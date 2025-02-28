@@ -388,7 +388,7 @@ impl<'g> FeatureSet<'g> {
     ///
     /// Returns an error if the `CargoOptions` weren't valid in some way (for example if an omitted
     /// package ID wasn't known to this graph.)
-    pub fn into_cargo_set(self, opts: &CargoOptions<'_>) -> Result<CargoSet<'g>, Error> {
+    pub fn into_cargo_set<'a>(self, opts: &'a CargoOptions<'a, 'g>) -> Result<CargoSet<'g>, Error> {
         let features_only = self.graph.resolve_none();
         CargoSet::new(self, features_only, opts)
     }

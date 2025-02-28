@@ -16,15 +16,15 @@ use crate::{
 use fixedbitset::FixedBitSet;
 use petgraph::{prelude::*, visit::VisitMap};
 
-pub(super) struct CargoSetBuildState<'a> {
-    opts: &'a CargoOptions<'a>,
+pub(super) struct CargoSetBuildState<'a, 'g> {
+    opts: &'a CargoOptions<'a, 'g>,
     omitted_packages: SortedSet<NodeIndex<PackageIx>>,
 }
 
-impl<'a> CargoSetBuildState<'a> {
-    pub(super) fn new<'g>(
+impl<'a, 'g> CargoSetBuildState<'a, 'g> {
+    pub(super) fn new(
         graph: &'g PackageGraph,
-        opts: &'a CargoOptions<'a>,
+        opts: &'a CargoOptions<'a, 'g>,
     ) -> Result<Self, Error> {
         let omitted_packages: SortedSet<_> =
             graph.package_ixs(opts.omitted_packages.iter().copied())?;
@@ -35,7 +35,7 @@ impl<'a> CargoSetBuildState<'a> {
         })
     }
 
-    pub(super) fn build<'g>(
+    pub(super) fn build(
         self,
         initials: FeatureSet<'g>,
         features_only: FeatureSet<'g>,
@@ -53,7 +53,7 @@ impl<'a> CargoSetBuildState<'a> {
         }
     }
 
-    pub(super) fn build_intermediate(self, query: FeatureQuery) -> CargoIntermediateSet {
+    pub(super) fn build_intermediate(self, query: FeatureQuery<'g>) -> CargoIntermediateSet<'g> {
         match self.opts.resolver {
             CargoResolverVersion::V1 => self.new_v1_intermediate(query, false),
             CargoResolverVersion::V1Install => {
@@ -64,7 +64,7 @@ impl<'a> CargoSetBuildState<'a> {
         }
     }
 
-    fn new_v1<'g>(
+    fn new_v1(
         self,
         initials: FeatureSet<'g>,
         features_only: FeatureSet<'g>,
@@ -75,7 +75,7 @@ impl<'a> CargoSetBuildState<'a> {
         })
     }
 
-    fn new_v2<'g>(self, initials: FeatureSet<'g>, features_only: FeatureSet<'g>) -> CargoSet<'g> {
+    fn new_v2(self, initials: FeatureSet<'g>, features_only: FeatureSet<'g>) -> CargoSet<'g> {
         self.build_set(initials, features_only, |query| {
             self.new_v2_intermediate(query)
         })
@@ -89,12 +89,12 @@ impl<'a> CargoSetBuildState<'a> {
         self.omitted_packages.contains(&package_ix)
     }
 
-    fn build_set<'g>(
+    fn build_set(
         &self,
         initials: FeatureSet<'g>,
         features_only: FeatureSet<'g>,
         intermediate_fn: impl FnOnce(FeatureQuery<'g>) -> CargoIntermediateSet<'g>,
-    ) -> CargoSet<'g> {
+    ) -> CargoSet {
         // Prepare a package query for step 2.
         let graph = *initials.graph();
         // Note that currently, proc macros specified in initials are built on both the target and
@@ -316,7 +316,7 @@ impl<'a> CargoSetBuildState<'a> {
         }
     }
 
-    fn new_v1_intermediate<'g>(
+    fn new_v1_intermediate(
         &self,
         query: FeatureQuery<'g>,
         avoid_dev_deps: bool,
@@ -343,7 +343,7 @@ impl<'a> CargoSetBuildState<'a> {
         CargoIntermediateSet::Unified(complete_set)
     }
 
-    fn new_v2_intermediate<'g>(&self, query: FeatureQuery<'g>) -> CargoIntermediateSet<'g> {
+    fn new_v2_intermediate(&self, query: FeatureQuery<'g>) -> CargoIntermediateSet<'g> {
         let graph = *query.graph();
         // Note that proc macros specified in initials take part in feature resolution
         // for both target and host ixs. If they didn't, then the query would be partitioned into

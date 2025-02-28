@@ -4,7 +4,7 @@
 use crate::{
     Error, PackageId,
     graph::{
-        DependencyDirection, PackageGraph, PackageIx, PackageLink, PackageSet,
+        DependencyDirection, PackageGraph, PackageIx, PackageLink, PackageQuery, PackageResolver, PackageSet,
         cargo::build::CargoSetBuildState,
         feature::{FeatureGraph, FeatureSet},
     },
@@ -13,13 +13,18 @@ use crate::{
 };
 use petgraph::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, fmt};
+use std::{
+    cell::RefCell,
+    collections::HashSet,
+    fmt,
+    rc::Rc,
+};
 
 /// Options for queries which simulate what Cargo does.
 ///
 /// This provides control over the resolution algorithm used by `guppy`'s simulation of Cargo.
 #[derive(Clone, Debug)]
-pub struct CargoOptions<'a> {
+pub struct CargoOptions<'a, 'g> {
     pub(crate) resolver: CargoResolverVersion,
     pub(crate) include_dev: bool,
     pub(crate) initials_platform: InitialsPlatform,
@@ -27,9 +32,35 @@ pub struct CargoOptions<'a> {
     pub(crate) host_platform: PlatformSpec,
     pub(crate) target_platform: PlatformSpec,
     pub(crate) omitted_packages: HashSet<&'a PackageId>,
+    pub(crate) extra_package_resolver: Option<DynPackageResolver<'g, 'a>>,
 }
 
-impl<'a> CargoOptions<'a> {
+/// Wrapper providing `Clone`, `Debug`, and `dyn`-based type erasure for any `PackageResolver`.
+/// `Rc` is used instead of `Box` to support `Clone` (transitively required by `CargoOptions`).
+#[derive(Clone)]
+pub(crate) struct DynPackageResolver<'graph, 'inner>(Rc<RefCell<dyn PackageResolver<'graph> + 'inner>>);
+
+impl<'graph, 'inner> DynPackageResolver<'graph, 'inner> {
+    fn new(resolver: impl PackageResolver<'graph> + 'inner) -> Self {
+        Self(Rc::new(RefCell::new(resolver)))
+    }
+}
+
+/// Minimal, probably not-very-useful `Debug`.  This is here mostly to meet the transitive
+/// requirements of `#[derive(Debug)]` of `CargoOptions`.
+impl<'graph, 'inner> fmt::Debug for DynPackageResolver<'graph, 'inner> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DynPackageResolver")
+    }
+}
+
+impl<'graph, 'inner> PackageResolver<'graph> for DynPackageResolver<'graph, 'inner> {
+    fn accept(&mut self, query: &PackageQuery<'graph>, link: PackageLink<'graph>) -> bool {
+        self.0.borrow_mut().accept(query, link)
+    }
+}
+
+impl<'a, 'g> CargoOptions<'a, 'g> {
     /// Creates a new `CargoOptions` with this resolver version and default settings.
     ///
     /// The default settings are similar to what a plain `cargo build` does:
@@ -47,6 +78,7 @@ impl<'a> CargoOptions<'a> {
             host_platform: PlatformSpec::Any,
             target_platform: PlatformSpec::Any,
             omitted_packages: HashSet::new(),
+            extra_package_resolver: None,
         }
     }
 
@@ -112,9 +144,31 @@ impl<'a> CargoOptions<'a> {
         self.omitted_packages.extend(package_ids);
         self
     }
+
+    /// Adds an extra resolver that can decide whether to follow a `PackageLink` edge.
+    /// The resolver will be consulted _after_ all the other decision points (e.g.  the Cargo
+    /// algorithm, `add_omitted_packages`, extra resolvers that have been added earlier, etc.) have
+    /// accepted the edge.
+    ///
+    /// This method is additive.
+    ///
+    /// Examples of when the extra resolver may be useful:
+    ///
+    /// * Further trimming down the dependency graph (e.g. based on evaluating
+    ///   `PlatformEval` for a set of platforms).
+    /// * Stashing the visited dependeny edges for further processing
+    ///   (e.g. to remember which dependency edges are active in the Cargo-resolved
+    ///   feature set).
+    pub fn add_extra_resolver(
+        &mut self,
+        extra_resolver: impl PackageResolver<'g> + 'a,
+    ) -> &mut Self {
+        self.extra_package_resolver = Some(DynPackageResolver::new(extra_resolver));
+        self
+    }
 }
 
-impl Default for CargoOptions<'_> {
+impl Default for CargoOptions<'_, '_> {
     fn default() -> Self {
         Self::new()
     }
@@ -250,10 +304,10 @@ impl<'g> CargoSet<'g> {
     /// written in a "fluent" style.
     ///
     ///
-    pub fn new(
+    pub fn new<'a>(
         initials: FeatureSet<'g>,
         features_only: FeatureSet<'g>,
-        opts: &CargoOptions<'_>,
+        opts: &'a CargoOptions<'a, 'g>,
     ) -> Result<Self, Error> {
         let build_state = CargoSetBuildState::new(initials.graph().package_graph, opts)?;
         Ok(build_state.build(initials, features_only))
@@ -265,9 +319,9 @@ impl<'g> CargoSet<'g> {
     ///
     /// Not part of the stable API, exposed for testing.
     #[doc(hidden)]
-    pub fn new_intermediate(
+    pub fn new_intermediate<'a>(
         initials: &FeatureSet<'g>,
-        opts: &CargoOptions<'_>,
+        opts: &'a CargoOptions<'a, 'g>,
     ) -> Result<CargoIntermediateSet<'g>, Error> {
         let build_state = CargoSetBuildState::new(initials.graph().package_graph, opts)?;
         Ok(build_state.build_intermediate(initials.to_feature_query(DependencyDirection::Forward)))
